@@ -1,105 +1,157 @@
+"""
+SQLite Database Module - Cache Layer for URL Analysis
+Handles all database operations with thread-safe access
+"""
 import sqlite3
 import threading
+import os
 from datetime import datetime
+from pathlib import Path
 
-DB_NAME = "url_risk.db"
+# Database configuration
+DB_DIR = Path(__file__).parent / "db"
+DB_PATH = DB_DIR / "url_risk.db"
+
 db_lock = threading.Lock()
 
+
 def get_connection():
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    """Get thread-safe database connection"""
+    DB_DIR.mkdir(exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def initialize_database():
-    """Initialize database schema"""
+    """Initialize database schema with proper indexes"""
     with db_lock:
         conn = get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_log (
+        CREATE TABLE IF NOT EXISTS url_analysis (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             url TEXT NOT NULL UNIQUE,
-            domain TEXT,
+            domain TEXT NOT NULL,
             domain_score INTEGER,
             url_score INTEGER,
             keyword_score INTEGER,
             security_score INTEGER,
             redirect_score INTEGER,
             total_score INTEGER,
-            risk_label INTEGER,
-            risk_type_label TEXT,
-            confidence REAL,
-            anomaly_flag INTEGER,
-            severity INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            predicted_risk_level INTEGER,
+            predicted_risk_type TEXT,
+            confidence_percent REAL,
+            anomaly_detected INTEGER,
+            risk_severity_index INTEGER,
+            why_risk TEXT,
+            actual_risk_level INTEGER,
+            actual_risk_type TEXT,
+            analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
         
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_url ON analysis_log(url)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON analysis_log(timestamp)")
+        # Create indexes for performance
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_url ON url_analysis(url)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_domain ON url_analysis(domain)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_analyzed_at ON url_analysis(analyzed_at)")
         
         conn.commit()
         conn.close()
+        print(f"✓ Database initialized: {DB_PATH}")
+
 
 def get_cached_result(url):
-    """Check if URL is already analyzed (CACHE HIT)"""
+    """
+    Retrieve cached analysis result
+    Returns None if not found, otherwise returns dict with all analysis data
+    """
     with db_lock:
         try:
             conn = get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM analysis_log WHERE url = ?", (url,))
-            result = cursor.fetchone()
+            cursor.execute('SELECT * FROM url_analysis WHERE url = ?', (url,))
+            row = cursor.fetchone()
             conn.close()
             
-            if result:
-                return {
-                    'url': result['url'],
-                    'domain': result['domain'],
-                    'domain_score': result['domain_score'],
-                    'url_score': result['url_score'],
-                    'keyword_score': result['keyword_score'],
-                    'security_score': result['security_score'],
-                    'redirect_score': result['redirect_score'],
-                    'total_score': result['total_score'],
-                    'risk_level': 'High' if result['risk_label'] == 1 else 'Low',
-                    'risk_type': result['risk_type_label'],
-                    'confidence_percent': result['confidence'],
-                    'anomaly_detected': bool(result['anomaly_flag']),
-                    'risk_severity_index': result['severity'],
-                    'cached': True
-                }
-            return None
-        except:
+            if not row:
+                return None
+            
+            # Use actual values if available, otherwise predicted
+            risk_level = row['actual_risk_level'] if row['actual_risk_level'] is not None else row['predicted_risk_level']
+            risk_type = row['actual_risk_type'] if row['actual_risk_type'] else row['predicted_risk_type']
+            
+            risk_map = {0: 'Low', 1: 'Medium', 2: 'High', 3: 'Critical'}
+            
+            return {
+                'url': row['url'],
+                'domain': row['domain'],
+                'domain_score': row['domain_score'],
+                'url_score': row['url_score'],
+                'keyword_score': row['keyword_score'],
+                'security_score': row['security_score'],
+                'redirect_score': row['redirect_score'],
+                'total_score': row['total_score'],
+                'risk_level': risk_map.get(risk_level, 'Low'),
+                'risk_level_numeric': risk_level,
+                'confidence_percent': row['confidence_percent'],
+                'anomaly_detected': bool(row['anomaly_detected']),
+                'risk_severity_index': row['risk_severity_index'],
+                'why_risk': row['why_risk'] or 'Multiple risk factors',
+                'risk_type': risk_type or 'Unknown',
+                'cached': True,
+                'analyzed_at': row['analyzed_at']
+            }
+        except Exception as e:
+            print(f"Cache read error: {e}")
             return None
 
-def store_analysis(url, domain, features, risk_label, risk_type, confidence, anomaly_flag, severity):
-    """Store new analysis result"""
+
+def store_analysis(url, domain, features, risk_label, risk_type, confidence, is_anomaly, severity, why_risk):
+    """Store or update analysis result in database"""
     with db_lock:
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
-            cursor.execute("""
-            INSERT OR REPLACE INTO analysis_log
-            (url, domain, domain_score, url_score, keyword_score, 
-             security_score, redirect_score, total_score, 
-             risk_label, risk_type_label, confidence, anomaly_flag, severity)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                url, domain,
-                features['domain_score'],
-                features['url_score'],
-                features['keyword_score'],
-                features['security_score'],
-                features['redirect_score'],
-                features['total_score'],
-                risk_label,
-                risk_type,
-                confidence,
-                1 if anomaly_flag else 0,
-                severity
-            ))
+            # Check if URL exists
+            cursor.execute('SELECT id FROM url_analysis WHERE url = ?', (url,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Update existing record
+                cursor.execute("""
+                    UPDATE url_analysis SET
+                        domain = ?, domain_score = ?, url_score = ?, keyword_score = ?,
+                        security_score = ?, redirect_score = ?, total_score = ?,
+                        predicted_risk_level = ?, predicted_risk_type = ?,
+                        confidence_percent = ?, anomaly_detected = ?, 
+                        risk_severity_index = ?, why_risk = ?, updated_at = ?
+                    WHERE url = ?
+                """, (
+                    domain, features['domain_score'], features['url_score'], 
+                    features['keyword_score'], features['security_score'], 
+                    features['redirect_score'], features['total_score'],
+                    risk_label, risk_type, confidence, int(is_anomaly), 
+                    severity, why_risk, datetime.now(), url
+                ))
+            else:
+                # Insert new record
+                cursor.execute("""
+                    INSERT INTO url_analysis (
+                        url, domain, domain_score, url_score, keyword_score,
+                        security_score, redirect_score, total_score,
+                        predicted_risk_level, predicted_risk_type, confidence_percent,
+                        anomaly_detected, risk_severity_index, why_risk
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    url, domain, features['domain_score'], features['url_score'],
+                    features['keyword_score'], features['security_score'],
+                    features['redirect_score'], features['total_score'],
+                    risk_label, risk_type, confidence, int(is_anomaly), severity, why_risk
+                ))
             
             conn.commit()
             conn.close()
@@ -108,36 +160,23 @@ def store_analysis(url, domain, features, risk_label, risk_type, confidence, ano
             print(f"Storage error: {e}")
             return False
 
-def update_labels(url, risk_label, risk_type):
-    """Update labels for manual corrections"""
-    with db_lock:
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-            UPDATE analysis_log 
-            SET risk_label = ?, risk_type_label = ?
-            WHERE url = ?
-            """, (risk_label, risk_type, url))
-            conn.commit()
-            conn.close()
-            return True
-        except:
-            return False
 
 def get_training_data():
-    """Fetch training data for ML models"""
+    """
+    Fetch all analysis records for model training
+    Returns: X (features), y_risk (labels), y_type (risk types)
+    """
     with db_lock:
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
             cursor.execute("""
-            SELECT domain_score, url_score, keyword_score, 
-                   security_score, redirect_score,
-                   risk_label, risk_type_label
-            FROM analysis_log
-            ORDER BY timestamp DESC
+                SELECT domain_score, url_score, keyword_score, 
+                       security_score, redirect_score,
+                       predicted_risk_level, predicted_risk_type
+                FROM url_analysis
+                ORDER BY analyzed_at DESC
             """)
             
             rows = cursor.fetchall()
@@ -148,41 +187,70 @@ def get_training_data():
             
             X = [[r['domain_score'], r['url_score'], r['keyword_score'],
                   r['security_score'], r['redirect_score']] for r in rows]
-            y_risk = [r['risk_label'] for r in rows]
-            y_type = [r['risk_type_label'] for r in rows]
+            y_risk = [r['predicted_risk_level'] for r in rows]
+            y_type = [r['predicted_risk_type'] for r in rows]
             
             return X, y_risk, y_type
         except Exception as e:
-            print(f"Training data error: {e}")
+            print(f"Training data fetch error: {e}")
             return None, None, None
 
+
 def get_record_count():
-    """Get total records in database"""
+    """Get total number of analyzed URLs"""
     with db_lock:
         try:
             conn = get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM analysis_log")
+            cursor.execute("SELECT COUNT(*) FROM url_analysis")
             count = cursor.fetchone()[0]
             conn.close()
             return count
         except:
             return 0
 
+
 def get_class_distribution():
-    """Get distribution of risk labels and types"""
+    """Get distribution of risk levels and types"""
     with db_lock:
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
-            cursor.execute("SELECT risk_label, COUNT(*) as count FROM analysis_log GROUP BY risk_label")
-            risk_dist = {row['risk_label']: row['count'] for row in cursor.fetchall()}
+            cursor.execute("""
+                SELECT predicted_risk_level, COUNT(*) as count 
+                FROM url_analysis 
+                GROUP BY predicted_risk_level
+            """)
+            risk_dist = {row['predicted_risk_level']: row['count'] for row in cursor.fetchall()}
             
-            cursor.execute("SELECT risk_type_label, COUNT(*) as count FROM analysis_log GROUP BY risk_type_label")
-            type_dist = {row['risk_type_label']: row['count'] for row in cursor.fetchall()}
+            cursor.execute("""
+                SELECT predicted_risk_type, COUNT(*) as count 
+                FROM url_analysis 
+                GROUP BY predicted_risk_type
+            """)
+            type_dist = {row['predicted_risk_type']: row['count'] for row in cursor.fetchall()}
             
             conn.close()
             return risk_dist, type_dist
         except:
             return {}, {}
+
+
+def update_labels(url, risk_level, risk_type):
+    """Update actual labels for manual corrections (for active learning)"""
+    with db_lock:
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE url_analysis 
+                SET actual_risk_level = ?, actual_risk_type = ?, updated_at = ?
+                WHERE url = ?
+            """, (risk_level, risk_type, datetime.now(), url))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Label update error: {e}")
+            return False
