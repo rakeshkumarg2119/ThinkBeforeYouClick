@@ -448,6 +448,6 @@ elif not analyze_clicked:
 st.markdown("---")
 st.markdown("""
 <div style="text-align:center;color:#333355;font-family:'Space Mono',monospace;font-size:0.72rem;padding-bottom:1rem">
-    URL Risk Analyzer v3.0 · Powered by Scikit-learn · FastAPI · Streamlit
+    URL Risk Analyzer · Powered by Scikit-learn · FastAPI · Streamlit
 </div>
 """, unsafe_allow_html=True)
