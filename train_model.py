@@ -63,7 +63,7 @@ def compute_real_features(url: str, domain: str) -> dict:
     """Call core_engine's exact same pipeline used during live analysis."""
     ds = calculate_domain_score(domain)
     us = calculate_url_score(url)
-    ks, inferred_type = calculate_keyword_score_and_type(url, domain)
+    ks, inferred_type, _type_hint = calculate_keyword_score_and_type(url, domain)
     ss = calculate_security_score(url)
     rs = 0   # redirect score: 0 for synthetic data (no live HTTP call)
     total = min(ds + us + ks + ss + rs, 100)

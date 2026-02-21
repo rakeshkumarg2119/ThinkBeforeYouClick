@@ -137,10 +137,10 @@ for url, exp_label, exp_type, label in TEST_CASES:
     # ── Use EXACT same pipeline as core_engine ────────────────────────────────
     ds = calculate_domain_score(domain)
     us = calculate_url_score(url)
-    ks, inferred_type = calculate_keyword_score_and_type(url, domain)
+    ks, inferred_type, _type_hint = calculate_keyword_score_and_type(url, domain)
     ss = calculate_security_score(url)
-    rs = 0   # no live redirect check
-    feat = np.array([[ds, us, ks, ss, rs]])
+    rs = 0
+    feat = np.array([[ds, us, ks, ss, rs, _type_hint]])
 
     # Risk level prediction
     if is_trusted_domain(domain):
@@ -217,7 +217,7 @@ for url, exp_label, exp_type, label in TEST_CASES:
     domain = urlparse(url).netloc.split(':')[0]
     ds = calculate_domain_score(domain)
     us = calculate_url_score(url)
-    ks, _ = calculate_keyword_score_and_type(url, domain)
+    ks, _, _type_hint = calculate_keyword_score_and_type(url, domain)
     ss = calculate_security_score(url)
     type_scores[exp_type].append([ds, us, ks, ss, 0])
 
